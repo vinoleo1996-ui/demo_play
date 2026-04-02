@@ -1,0 +1,53 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Stores user preferences and current state.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "lastSeen": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid"]
+    },
+    "Memory": {
+      "title": "User Memory",
+      "description": "Stores short-to-medium term events or facts about the user.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "content": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "isResolved": { "type": "boolean" }
+      },
+      "required": ["uid", "content", "timestamp"]
+    },
+    "Persona": {
+      "title": "Robot Persona",
+      "description": "Configuration for the robot's personality.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "name": { "type": "string" },
+        "mbti": { "type": "string" },
+        "style": { "type": "string" }
+      },
+      "required": ["uid", "name", "mbti"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserProfile",
+      "description": "User profile data."
+    },
+    "/users/{userId}/memories/{memoryId}": {
+      "schema": "Memory",
+      "description": "Memories associated with the user."
+    },
+    "/users/{userId}/persona": {
+      "schema": "Persona",
+      "description": "The user's customized robot persona."
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "Proactive Robot Companion",
+  "description": "An AI companion that recognizes your mood, remembers your plans, and proactively interacts with you based on its unique persona.",
+  "requestFramePermissions": ["camera", "microphone"]
+}
