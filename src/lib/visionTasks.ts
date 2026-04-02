@@ -29,16 +29,26 @@ export async function initVisionTasks() {
   console.log("MediaPipe Vision Tasks initialized");
 }
 
+let lastGestureTime = -1;
 export function detectGestures(video: HTMLVideoElement) {
   if (!gestureRecognizer) return null;
-  const nowInMs = Date.now();
+  let nowInMs = performance.now();
+  if (nowInMs <= lastGestureTime) {
+    nowInMs = lastGestureTime + 1;
+  }
+  lastGestureTime = nowInMs;
   const results = gestureRecognizer.recognizeForVideo(video, nowInMs);
   return results;
 }
 
+let lastPoseTime = -1;
 export function detectPose(video: HTMLVideoElement) {
   if (!poseLandmarker) return null;
-  const nowInMs = Date.now();
+  let nowInMs = performance.now();
+  if (nowInMs <= lastPoseTime) {
+    nowInMs = lastPoseTime + 1;
+  }
+  lastPoseTime = nowInMs;
   const results = poseLandmarker.detectForVideo(video, nowInMs);
   return results;
 }

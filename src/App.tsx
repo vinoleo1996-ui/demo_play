@@ -4,15 +4,17 @@ import { onAuthStateChanged, User } from 'firebase/auth';
 import { collection, doc, getDoc, setDoc, addDoc, onSnapshot, query, orderBy, limit, updateDoc, deleteDoc, getDocs } from 'firebase/firestore';
 import { loadModels, getFaceDescriptor, computeFaceMatcher, detectAll } from './lib/faceDetection';
 import { extractMemory, generateProactiveResponse, chatWithRobot, getFashionAdvice, Memory, Persona, generateTTS } from './lib/gemini';
+import { LiveAPI } from './lib/live';
 import { initVisionTasks, detectGestures, detectPose } from './lib/visionTasks';
 import { initAudioTasks, getLoudness } from './lib/audioTasks';
 import { behaviorManager, RobotEvent } from './lib/behaviorManager';
 import { RobotCharacter } from './components/RobotCharacter';
-import { Camera, Send, User as UserIcon, Settings, Brain, Smile, LogOut, Upload, Sparkles, RefreshCw, Mic, MicOff, Volume2, ShieldCheck, Trash2, MapPin, Activity } from 'lucide-react';
+import { Camera, Send, User as UserIcon, Settings, Brain, Smile, LogOut, Upload, Sparkles, RefreshCw, Mic, MicOff, Volume2, ShieldCheck, Trash2, MapPin, Activity, GripVertical } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import ReactMarkdown from 'react-markdown';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels';
 
 function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -28,6 +30,7 @@ export default function App() {
   const [modelError, setModelError] = useState<string | null>(null);
   const [isDetecting, setIsDetecting] = useState(false);
   const [currentExpression, setCurrentExpression] = useState<string | null>(null);
+  const [robotExpression, setRobotExpression] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isProactiveTriggered, setIsProactiveTriggered] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -38,18 +41,28 @@ export default function App() {
   const [isRecognized, setIsRecognized] = useState(false);
   const [isStranger, setIsStranger] = useState(false);
   const [recognizedPerson, setRecognizedPerson] = useState<string | null>(null);
-  const [registeredPeople, setRegisteredPeople] = useState<{ id: string, name: string, descriptor: number[] }[]>([]);
+  const [registeredPeople, setRegisteredPeople] = useState<{ id: string, name: string, descriptor: number[], backgroundInfo?: string }[]>([]);
   const [isVoiceEnabled, setIsVoiceEnabled] = useState(false);
+  const [autoStartLive, setAutoStartLive] = useState(true);
+  const autoStartLiveRef = useRef(true);
+
+  useEffect(() => {
+    autoStartLiveRef.current = autoStartLive;
+  }, [autoStartLive]);
   const [isListening, setIsListening] = useState(false);
   const [debugInfo, setDebugInfo] = useState<string>('');
   const [isNameModalOpen, setIsNameModalOpen] = useState(false);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [inputName, setInputName] = useState('');
+  const [inputBackground, setInputBackground] = useState('');
   const [virtualDate, setVirtualDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [location, setLocation] = useState<string | null>(null);
   const [lookAt, setLookAt] = useState({ x: 0, y: 0 });
   const [loudness, setLoudness] = useState(0);
   const [lastGesture, setLastGesture] = useState<string | null>(null);
+  const [isAwake, setIsAwake] = useState(false);
+  const [panelDirection, setPanelDirection] = useState<'horizontal' | 'vertical'>('horizontal');
+  const wakeWord = "小博";
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -57,20 +70,42 @@ export default function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const sleepTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const liveApiRef = useRef<LiveAPI | null>(null);
+
+  useEffect(() => {
+    if ("geolocation" in navigator) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          setLocation(`纬度: ${position.coords.latitude.toFixed(4)}, 经度: ${position.coords.longitude.toFixed(4)}`);
+        },
+        (error) => {
+          console.error("Geolocation error:", error);
+          setLocation("上海"); // Fallback to Shanghai as requested if permission fails
+        }
+      );
+    } else {
+      setLocation("上海");
+    }
+  }, []);
   
   // Refs for detection loop to avoid stale closures
   const isDetectingRef = useRef(false);
   const isRecognizedRef = useRef(false);
   const isStrangerRef = useRef(false);
   const recognizedPersonRef = useRef<string | null>(null);
-  const registeredPeopleRef = useRef<{ id: string, name: string, descriptor: number[] }[]>([]);
+  const registeredPeopleRef = useRef<{ id: string, name: string, descriptor: number[], backgroundInfo?: string }[]>([]);
   const faceLostCounterRef = useRef(0);
-  const lastGreetedTimeRef = useRef(0);
+  const lastGreetedTimeRef = useRef<Record<string, number>>({});
+  const lastProactiveTimeRef = useRef<number>(0);
+  const lastGestureTimeRef = useRef<Record<string, number>>({});
+  const lastPoseTimeRef = useRef<Record<string, number>>({});
   const lastHappyTriggerTimeRef = useRef(0);
   const lastProactiveDateRef = useRef<Record<string, string>>({}); // personName -> lastProactiveDate
   const isProcessingRef = useRef(false);
   const virtualDateRef = useRef(virtualDate);
   const memoriesRef = useRef<Memory[]>([]);
+  const happyDurationCounterRef = useRef(0);
 
   useEffect(() => {
     virtualDateRef.current = virtualDate;
@@ -138,7 +173,7 @@ export default function App() {
         const peopleRef = collection(db, 'users', u.uid, 'people');
         const peopleQuery = query(peopleRef, orderBy('timestamp', 'desc'));
         onSnapshot(peopleQuery, (snapshot) => {
-          setRegisteredPeople(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as { id: string, name: string, descriptor: number[] })));
+          setRegisteredPeople(snapshot.docs.map(d => ({ id: d.id, ...d.data() } as { id: string, name: string, descriptor: number[], backgroundInfo?: string })));
         });
 
         const memoriesRef = collection(db, 'users', u.uid, 'memories');
@@ -177,24 +212,39 @@ export default function App() {
   }, [messages]);
 
   const startCamera = async () => {
+    // Create AudioContext synchronously on user click
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+
     if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: true,
+          audio: { 
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          } 
+        });
+        
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
           setIsDetecting(true);
         }
 
-        // Also start audio for loudness
-        const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        audioStreamRef.current = audioStream;
-        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const source = audioCtx.createMediaStreamSource(audioStream);
+        audioStreamRef.current = stream;
+        const source = audioCtx.createMediaStreamSource(stream);
         const analyser = audioCtx.createAnalyser();
         analyser.fftSize = 256;
         source.connect(analyser);
         analyserRef.current = analyser;
         audioContextRef.current = audioCtx;
+
+        if (autoStartLiveRef.current && !liveApiRef.current) {
+          toggleLiveAPI(audioCtx, stream);
+        }
       } catch (err) {
         console.error("Error starting camera/audio:", err);
       }
@@ -250,25 +300,63 @@ export default function App() {
           }
         }
 
+        const now = Date.now();
+        const GLOBAL_PROACTIVE_COOLDOWN = 20000; // 20 seconds
+        const GESTURE_COOLDOWN = 30000; // 30 seconds
+
         // 2. Vision Tasks (Gesture & Pose)
         const gestureResults = detectGestures(videoRef.current);
         const poseResults = detectPose(videoRef.current);
 
         if (gestureResults && gestureResults.gestures.length > 0) {
           const gesture = gestureResults.gestures[0][0].categoryName;
-          if (gesture !== 'None' && gesture !== lastGesture) {
+          if (gesture === 'ILoveYou' || gesture === 'Thumb_Up') {
             setLastGesture(gesture);
             behaviorManager.pushEvent('gesture_detected', { gesture });
-            if (gesture === 'Thumb_Up') {
-              if (isVoiceEnabled) speak("谢谢你的点赞！我也觉得很棒。");
-            } else if (gesture === 'Victory') {
-              if (isVoiceEnabled) speak("耶！胜利！");
+            
+            const lastTime = lastGestureTimeRef.current[gesture] || 0;
+            if (now - lastTime > GESTURE_COOLDOWN && now - lastProactiveTimeRef.current > GLOBAL_PROACTIVE_COOLDOWN) {
+              lastGestureTimeRef.current[gesture] = now;
+              lastProactiveTimeRef.current = now;
+              triggerProactive('gesture', gesture);
             }
           }
         }
 
         if (poseResults && poseResults.landmarks.length > 0) {
-          behaviorManager.pushEvent('pose_detected', { pose: poseResults.landmarks[0] });
+          const landmarks = poseResults.landmarks[0];
+          behaviorManager.pushEvent('pose_detected', { pose: landmarks });
+          
+          const leftWrist = landmarks[15];
+          const rightWrist = landmarks[16];
+          const leftShoulder = landmarks[11];
+          const rightShoulder = landmarks[12];
+          const leftEye = landmarks[2];
+          const rightEye = landmarks[5];
+          
+          if (leftWrist && rightWrist && leftShoulder && rightShoulder && leftEye && rightEye) {
+            // Open arms for hug: Wrists are far apart, roughly at shoulder height
+            const armsOpen = Math.abs(leftWrist.x - rightWrist.x) > 0.6 && 
+                             leftWrist.y > leftEye.y && rightWrist.y > rightEye.y &&
+                             leftWrist.y < leftShoulder.y + 0.2 && rightWrist.y < rightShoulder.y + 0.2;
+            
+            // Waving to come over: One wrist is above the eye
+            const waving = (leftWrist.y < leftEye.y && rightWrist.y > rightShoulder.y) || 
+                           (rightWrist.y < rightEye.y && leftWrist.y > leftShoulder.y);
+
+            let poseType = null;
+            if (armsOpen) poseType = 'open_arms';
+            else if (waving) poseType = 'waving';
+
+            if (poseType) {
+              const lastTime = lastPoseTimeRef.current[poseType] || 0;
+              if (now - lastTime > GESTURE_COOLDOWN && now - lastProactiveTimeRef.current > GLOBAL_PROACTIVE_COOLDOWN) {
+                lastPoseTimeRef.current[poseType] = now;
+                lastProactiveTimeRef.current = now;
+                triggerProactive('pose', poseType);
+              }
+            }
+          }
         }
 
         // 3. Face detection
@@ -277,7 +365,6 @@ export default function App() {
         if (detections.length > 0) {
           faceLostCounterRef.current = 0;
           const detection = detections[0];
-          const now = Date.now();
           
           // Update lookAt based on face position
           const box = detection.detection.box;
@@ -285,8 +372,8 @@ export default function App() {
           const centerY = (box.y + box.height / 2) / videoRef.current.videoHeight;
           setLookAt({ x: (centerX - 0.5) * 2, y: -(centerY - 0.5) * 2 });
 
-          const greetingCooldown = 15000; // 15 seconds cooldown for greetings
-          const happyCooldown = 60000; // 1 minute cooldown for happy expression trigger
+          const greetingCooldown = 2 * 60 * 60 * 1000; // 2 hours cooldown for greetings
+          const happyCooldown = 60 * 60 * 1000; // 1 hour cooldown for happy expression trigger
 
           // 1. Expression detection
           const expressions = detection.expressions;
@@ -305,11 +392,20 @@ export default function App() {
           };
           setCurrentExpression(expressionMap[dominantExpression] || dominantExpression);
           
-          if (dominantExpression === 'happy' && isRecognizedRef.current) {
-            if (now - lastHappyTriggerTimeRef.current > happyCooldown) {
-              lastHappyTriggerTimeRef.current = now;
-              triggerProactive('happy');
+          if ((dominantExpression === 'happy' || dominantExpression === 'sad' || dominantExpression === 'angry') && isRecognizedRef.current) {
+            happyDurationCounterRef.current += 1;
+            // Require 5 consecutive seconds of strong emotion
+            if (happyDurationCounterRef.current >= 5) {
+              if (now - lastHappyTriggerTimeRef.current > happyCooldown && now - lastProactiveTimeRef.current > GLOBAL_PROACTIVE_COOLDOWN) {
+                lastHappyTriggerTimeRef.current = now;
+                lastProactiveTimeRef.current = now;
+                const emotionType = dominantExpression === 'happy' ? 'happy' : 'unhappy';
+                triggerProactive(emotionType as any);
+              }
+              happyDurationCounterRef.current = 0; // Reset after triggering or if in cooldown
             }
+          } else {
+            happyDurationCounterRef.current = 0;
           }
 
           // 2. Recognition logic
@@ -323,51 +419,75 @@ export default function App() {
               const personName = match.label;
               const lastDate = lastProactiveDateRef.current[personName];
               const isNewDay = lastDate !== virtualDateRef.current;
+              const lastGreeted = lastGreetedTimeRef.current[personName] || 0;
 
-              if (!isRecognizedRef.current || recognizedPersonRef.current !== personName || isNewDay) {
-                // Only greet if not already recognized as this person OR if it's been a long time OR if it's a new day
-                if (now - lastGreetedTimeRef.current > greetingCooldown || recognizedPersonRef.current !== personName || isNewDay) {
+              if (!isRecognizedRef.current || recognizedPersonRef.current !== personName || isNewDay || (now - lastGreeted > greetingCooldown)) {
+                // Only greet if it's a new day (first time seeing today) OR if it's been > 2 hours
+                if (isNewDay || (now - lastGreeted > greetingCooldown)) {
                   setIsRecognized(true);
                   setIsStranger(false);
                   setRecognizedPerson(personName);
-                  lastGreetedTimeRef.current = now;
+                  lastGreetedTimeRef.current[personName] = now;
                   lastProactiveDateRef.current[personName] = virtualDateRef.current;
+                  setIsAwake(true);
+                  resetSleepTimer();
                   
                   const welcomeMsg = isNewDay 
-                    ? `早上好 ${personName}！今天是新的一天（${virtualDateRef.current}），很高兴再次见到你。`
-                    : `你好 ${personName}！我认出你啦。你今天感觉怎么样？`;
+                    ? `早上好 ${personName}！今天是新的一天（${virtualDateRef.current}），很高兴见到你。`
+                    : `你好 ${personName}！好久不见，欢迎回来。`;
                   
-                  setMessages(prev => [...prev, { role: 'model', text: welcomeMsg }]);
-                  if (isVoiceEnabled) speak(welcomeMsg);
+                  if (liveApiRef.current) {
+                    liveApiRef.current.sendText(`[系统提示：用户 ${personName} 刚刚出现在你面前。${isNewDay ? '这是今天第一次见到他。' : '距离上次见到他已经过了2个多小时。'} 请主动、简短地打个招呼。]`);
+                  } else {
+                    setMessages(prev => [...prev, { role: 'model', text: welcomeMsg }]);
+                    if (isVoiceEnabled) speak(welcomeMsg);
+                  }
                   
                   // Trigger proactive weather/memory check after greeting
                   setTimeout(() => {
                     triggerProactive('weather');
                   }, 2000);
+                } else if (recognizedPersonRef.current !== personName) {
+                  // Just recognize them without a proactive greeting if within 2 hours
+                  setIsRecognized(true);
+                  setIsStranger(false);
+                  setRecognizedPerson(personName);
+                  setIsAwake(true);
+                  resetSleepTimer();
                 }
               }
             } else {
               // Stranger detected
+              const lastStrangerGreeted = lastGreetedTimeRef.current['unknown'] || 0;
               if (!isStrangerRef.current && !isRecognizedRef.current) {
-                if (now - lastGreetedTimeRef.current > greetingCooldown) {
+                if (now - lastStrangerGreeted > greetingCooldown) {
                   setIsStranger(true);
-                  lastGreetedTimeRef.current = now;
+                  lastGreetedTimeRef.current['unknown'] = now;
                   const strangerMsg = "你好，陌生人！我还不认识你，你可以点击侧边栏的上传按钮让我记住你。";
-                  setMessages(prev => [...prev, { role: 'model', text: strangerMsg }]);
-                  if (isVoiceEnabled) speak(strangerMsg);
+                  if (liveApiRef.current) {
+                    liveApiRef.current.sendText(`[系统提示：检测到一个陌生人。请主动、简短地打个招呼，并提示他可以注册人脸。]`);
+                  } else {
+                    setMessages(prev => [...prev, { role: 'model', text: strangerMsg }]);
+                    if (isVoiceEnabled) speak(strangerMsg);
+                  }
                 }
               }
             }
           } else {
             // No registered people, but a face is detected
             setDebugInfo("检测到人脸: 库中无数据");
+            const lastStrangerGreeted = lastGreetedTimeRef.current['unknown'] || 0;
             if (!isStrangerRef.current && !isRecognizedRef.current) {
-              if (now - lastGreetedTimeRef.current > greetingCooldown) {
+              if (now - lastStrangerGreeted > greetingCooldown) {
                 setIsStranger(true);
-                lastGreetedTimeRef.current = now;
+                lastGreetedTimeRef.current['unknown'] = now;
                 const strangerMsg = "你好，陌生人！我还不认识你，你可以点击侧边栏的上传按钮让我记住你。";
-                setMessages(prev => [...prev, { role: 'model', text: strangerMsg }]);
-                if (isVoiceEnabled) speak(strangerMsg);
+                if (liveApiRef.current) {
+                  liveApiRef.current.sendText(`[系统提示：检测到一个陌生人。请主动、简短地打个招呼，并提示他可以注册人脸。]`);
+                } else {
+                  setMessages(prev => [...prev, { role: 'model', text: strangerMsg }]);
+                  if (isVoiceEnabled) speak(strangerMsg);
+                }
               }
             }
           }
@@ -383,8 +503,7 @@ export default function App() {
               setIsProactiveTriggered(false);
               setCurrentExpression(null);
               setLookAt({ x: 0, y: 0 });
-              // Reset greeting time so they can be greeted again when they return
-              lastGreetedTimeRef.current = 0;
+              // Do NOT reset greeting time here, so the 1-hour cooldown persists even if they leave and come back
             }
           }
         }
@@ -412,20 +531,50 @@ export default function App() {
     return () => clearInterval(interval);
   }, []);
 
-  const triggerProactive = async (type: 'happy' | 'memory' | 'weather') => {
+  const triggerProactive = async (type: 'happy' | 'unhappy' | 'memory' | 'weather' | 'gesture' | 'pose', payload?: any) => {
     setIsProactiveTriggered(true);
+    
+    const currentPerson = registeredPeopleRef.current.find(p => p.name === recognizedPersonRef.current);
+    const backgroundInfo = currentPerson?.backgroundInfo;
+    const personName = recognizedPersonRef.current || '用户';
+
+    if (liveApiRef.current) {
+      let prompt = '';
+      if (type === 'happy') {
+        prompt = `[系统提示：检测到 ${personName} 看起来很开心。请主动、自然地询问他遇到了什么好事。]`;
+      } else if (type === 'unhappy') {
+        prompt = `[系统提示：检测到 ${personName} 看起来有些难过或生气。请用温柔、关心的语气询问他怎么了，安慰他。]`;
+      } else if (type === 'gesture') {
+        prompt = `[系统提示：${personName} 刚刚对你做了一个手势：${payload}。请用简短、自然的话回应这个手势。]`;
+      } else if (type === 'pose') {
+        const poseName = payload === 'open_arms' ? '张开双臂求抱抱' : payload === 'waving' ? '挥手叫你过去' : payload;
+        prompt = `[系统提示：${personName} 刚刚做了一个动作：${poseName}。请用符合你人设的话回应他。]`;
+      } else if (type === 'weather' || type === 'memory') {
+        prompt = `[系统提示：请检查 ${personName} 的记忆库，如果今天（${virtualDateRef.current}）有重要事件（如看演唱会），请主动提醒并祝他顺利。如果没有相关记忆，请忽略此提示，不要说话。]`;
+      }
+      
+      if (prompt) {
+        liveApiRef.current.sendText(prompt);
+      }
+      return;
+    }
+
     setIsLoading(true);
     const response = await generateProactiveResponse(
       persona, 
-      type === 'memory' ? memoriesRef.current : [], 
-      type === 'happy' ? 'happy' : (type === 'weather' ? 'weather' : null),
+      memoriesRef.current, 
+      type as any,
       virtualDateRef.current,
       recognizedPersonRef.current,
-      location
+      location,
+      payload,
+      backgroundInfo
     );
     if (response) {
       setMessages(prev => [...prev, { role: 'model', text: response }]);
-      if (isVoiceEnabled) speak(response);
+      if (isVoiceEnabled) {
+        speak(response);
+      }
     }
     setIsLoading(false);
   };
@@ -447,8 +596,14 @@ export default function App() {
           audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
         }
         
+        // Browsers require user interaction to resume AudioContext.
+        // If it's suspended, we try to resume it. If it fails, we might need a user click.
         if (audioContextRef.current.state === 'suspended') {
-          await audioContextRef.current.resume();
+          try {
+            await audioContextRef.current.resume();
+          } catch (e) {
+            console.warn("Could not resume AudioContext automatically. User interaction required.", e);
+          }
         }
         
         const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
@@ -470,16 +625,34 @@ export default function App() {
     setMessages(prev => [...prev, { role: 'user', text: msg }]);
     setIsLoading(true);
 
+    if (liveApiRef.current) {
+      liveApiRef.current.sendText(msg);
+      extractAndSaveMemory(msg);
+      return;
+    }
+
     try {
       const response = await chatWithRobot(persona, msg, messages.map(m => ({ role: m.role, parts: m.text })));
       setMessages(prev => [...prev, { role: 'model', text: response }]);
       if (isVoiceEnabled) speak(response);
 
-      const memory = await extractMemory(msg, recognizedPersonRef.current, location);
-      if (memory && memory !== "none") {
+      extractAndSaveMemory(msg);
+    } catch (error) {
+      console.error("Chat error:", error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const extractAndSaveMemory = async (msg: string) => {
+    if (!user) return;
+    try {
+      const memoryResult = await extractMemory(msg, recognizedPersonRef.current, location);
+      if (memoryResult) {
         const memoriesRef = collection(db, 'users', user.uid, 'memories');
         await addDoc(memoriesRef, {
-          content: memory,
+          content: memoryResult.content,
+          category: memoryResult.category || 'general',
           timestamp: virtualDate, // Use virtual date for memory timestamp
           isResolved: false,
           personName: recognizedPersonRef.current, // Bind memory to the recognized person
@@ -487,9 +660,7 @@ export default function App() {
         });
       }
     } catch (error) {
-      console.error("Chat error:", error);
-    } finally {
-      setIsLoading(false);
+      console.error("Memory extraction error:", error);
     }
   };
 
@@ -636,48 +807,85 @@ export default function App() {
     const nextDateStr = nextDate.toISOString().split('T')[0];
     setVirtualDate(nextDateStr);
     setIsProactiveTriggered(false); // Reset proactive trigger for the new day
-    setMessages(prev => [...prev, { role: 'model', text: `📅 **模拟进入第二天**：当前虚拟日期已更新为 **${nextDateStr}**。` }]);
-    if (isVoiceEnabled) speak(`已经到第二天了，今天是 ${nextDateStr}。`);
+    
+    const msg = `📅 **模拟进入第二天**：当前虚拟日期已更新为 **${nextDateStr}**。`;
+    setMessages(prev => [...prev, { role: 'model', text: msg }]);
+    
+    if (recognizedPersonRef.current) {
+      // If someone is currently in front of the camera, trigger proactive interaction
+      // to check memories and weather for the new day.
+      triggerProactive('weather');
+    }
   };
 
-  const startListening = () => {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRecognition) {
-      const recognition = new SpeechRecognition();
-      recognition.lang = 'zh-CN';
-      recognition.continuous = false;
-      recognition.interimResults = false;
+  const resetSleepTimer = () => {
+    if (sleepTimerRef.current) clearTimeout(sleepTimerRef.current);
+    sleepTimerRef.current = setTimeout(() => {
+      setIsAwake(false);
+      setMessages(prev => [...prev, { role: 'model', text: "我先休息啦，有事叫我“小博”哦。" }]);
+      if (isVoiceEnabled) speak("我先休息啦，有事叫我小博哦。");
+    }, 15000); // 15 seconds of inactivity to go to sleep
+  };
 
-      recognition.onstart = () => {
-        setIsListening(true);
-        if (audioContextRef.current?.state === 'suspended') {
-          audioContextRef.current.resume();
-        }
-      };
-
-      recognition.onresult = (event: any) => {
-        const transcript = event.results[0][0].transcript;
-        if (transcript) {
-          handleSendMessage(transcript);
-        }
-      };
-
-      recognition.onerror = (event: any) => {
-        console.error("Speech recognition error:", event.error);
-        setIsListening(false);
-        if (event.error === 'not-allowed') {
-          setMessages(prev => [...prev, { role: 'model', text: "❌ 语音识别权限被拒绝。请确保已开启麦克风权限。" }]);
-        }
-      };
-
-      recognition.onend = () => {
-        setIsListening(false);
-      };
-
-      recognition.start();
-    } else {
-      setMessages(prev => [...prev, { role: 'model', text: "❌ 您的浏览器不支持语音识别功能。" }]);
+  const toggleLiveAPI = async (externalAudioContext?: AudioContext, externalMediaStream?: MediaStream) => {
+    if (liveApiRef.current) {
+      liveApiRef.current.stop();
+      liveApiRef.current = null;
+      setIsListening(false);
+      setIsVoiceEnabled(false);
+      return;
     }
+
+    // Create AudioContext synchronously if not provided
+    const audioCtx = externalAudioContext || new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+
+    setIsVoiceEnabled(true);
+    setIsListening(true);
+    setIsAwake(true);
+    
+    const liveApi = new LiveAPI();
+    liveApiRef.current = liveApi;
+
+    liveApi.onMessage = (text, isUser) => {
+      setMessages(prev => [...prev, { role: isUser ? 'user' : 'model', text }]);
+      if (!isUser) {
+        setIsLoading(false);
+      }
+      resetSleepTimer();
+    };
+
+    liveApi.onStart = () => {
+      setMessages(prev => [...prev, { role: 'model', text: "🎤 实时语音对话已开启，请直接对我说话。" }]);
+    };
+
+    liveApi.onExpression = (expression) => {
+      setRobotExpression(expression);
+      // Reset expression after a few seconds
+      setTimeout(() => {
+        setRobotExpression(null);
+      }, 3000);
+    };
+
+    liveApi.onStop = () => {
+      setIsListening(false);
+      setIsVoiceEnabled(false);
+      liveApiRef.current = null;
+    };
+
+    liveApi.onError = (err) => {
+      setMessages(prev => [...prev, { role: 'model', text: `❌ 语音连接错误: ${err.message || '未知错误'}` }]);
+      setIsListening(false);
+      setIsVoiceEnabled(false);
+      liveApiRef.current = null;
+    };
+
+    const currentPerson = registeredPeopleRef.current.find(p => p.name === recognizedPersonRef.current);
+    const backgroundInfo = currentPerson?.backgroundInfo;
+
+    await liveApi.start(persona, memories, location, backgroundInfo, audioCtx, externalMediaStream);
   };
 
   if (!user) {
@@ -731,10 +939,17 @@ export default function App() {
                 type="text" 
                 value={inputName}
                 onChange={(e) => setInputName(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && processRegistration()}
                 placeholder="例如：张三"
                 autoFocus
-                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-6"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-4"
+              />
+              
+              <textarea
+                value={inputBackground}
+                onChange={(e) => setInputBackground(e.target.value)}
+                placeholder="背景信息（可选，例如：我的好朋友，喜欢打篮球）"
+                rows={3}
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-6 resize-none"
               />
               
               <div className="flex gap-4">
@@ -898,17 +1113,24 @@ export default function App() {
               <p className="text-slate-500 text-[10px] italic">暂无注册人脸，请点击上传...</p>
             ) : (
               registeredPeople.map((p, i) => (
-                <div key={p.id} className="flex items-center justify-between bg-slate-800/50 p-2 rounded-lg border border-slate-700/50 group">
-                  <div className="flex items-center gap-2 overflow-hidden">
-                    <div className="w-1.5 h-1.5 bg-green-500 rounded-full shrink-0" />
-                    <span className="text-xs text-slate-300 truncate">{p.name}</span>
+                <div key={p.id} className="flex flex-col bg-slate-800/50 p-2 rounded-lg border border-slate-700/50 group">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <div className="w-1.5 h-1.5 bg-green-500 rounded-full shrink-0" />
+                      <span className="text-xs text-slate-300 truncate font-bold">{p.name}</span>
+                    </div>
+                    <button 
+                      onClick={() => handleDeletePerson(p.id, p.name)}
+                      className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 text-slate-500 transition-all"
+                    >
+                      <LogOut className="w-3 h-3 rotate-90" />
+                    </button>
                   </div>
-                  <button 
-                    onClick={() => handleDeletePerson(p.id, p.name)}
-                    className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 text-slate-500 transition-all"
-                  >
-                    <LogOut className="w-3 h-3 rotate-90" />
-                  </button>
+                  {p.backgroundInfo && (
+                    <div className="text-[10px] text-slate-400 mt-1 pl-3.5 border-l border-slate-700 ml-1">
+                      {p.backgroundInfo}
+                    </div>
+                  )}
                 </div>
               ))
             )}
@@ -932,6 +1154,9 @@ export default function App() {
               <div className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-400 font-mono">
                 {virtualDate}
               </div>
+              <div className="text-[10px] bg-slate-800 px-2 py-0.5 rounded text-slate-400 truncate max-w-[100px]" title={location || '获取位置中...'}>
+                {location || '获取位置中...'}
+              </div>
             </div>
           </div>
           {location && (
@@ -940,35 +1165,52 @@ export default function App() {
               <span>当前位置: {location}</span>
             </div>
           )}
-          <div className="space-y-2 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
+          <div className="space-y-4 max-h-64 overflow-y-auto pr-2 custom-scrollbar">
             {memories.length === 0 ? (
               <p className="text-slate-500 text-sm italic">暂无记忆...</p>
             ) : (
-              memories.filter(m => !recognizedPerson || m.personName === recognizedPerson).map((m, i) => (
-                <motion.div 
-                  key={m.id || i}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  className="bg-slate-800/50 border border-slate-700/50 p-3 rounded-xl text-sm group relative"
-                >
-                  <div className="flex items-center justify-between mb-1">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-bold text-indigo-400 uppercase">{m.personName || '通用'}</span>
-                      {m.location && <span className="text-[8px] text-slate-500 flex items-center gap-0.5"><MapPin className="w-2 h-2" />{m.location}</span>}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] text-slate-500">{m.timestamp}</span>
-                      <button 
-                        onClick={() => m.id && handleDeleteMemory(m.id)}
-                        className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 text-slate-500 transition-all"
+              ['mood', 'topic', 'event', 'general'].map(category => {
+                const categoryMemories = memories.filter(m => (!recognizedPerson || m.personName === recognizedPerson) && (m.category === category || (!m.category && category === 'general')));
+                if (categoryMemories.length === 0) return null;
+                
+                const categoryLabels: Record<string, string> = {
+                  mood: '心情状态',
+                  topic: '喜爱话题',
+                  event: '任务事件',
+                  general: '其他记忆'
+                };
+                
+                return (
+                  <div key={category} className="space-y-2">
+                    <div className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-1">{categoryLabels[category]}</div>
+                    {categoryMemories.map((m, i) => (
+                      <motion.div 
+                        key={m.id || i}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="bg-slate-800/50 border border-slate-700/50 p-3 rounded-xl text-sm group relative"
                       >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
+                        <div className="flex items-center justify-between mb-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] font-bold text-indigo-400 uppercase">{m.personName || '通用'}</span>
+                            {m.location && <span className="text-[8px] text-slate-500 flex items-center gap-0.5"><MapPin className="w-2 h-2" />{m.location}</span>}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-slate-500">{m.timestamp}</span>
+                            <button 
+                              onClick={() => m.id && handleDeleteMemory(m.id)}
+                              className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-400 text-slate-500 transition-all"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </div>
+                        <p className="text-slate-300">{m.content}</p>
+                      </motion.div>
+                    ))}
                   </div>
-                  <p className="text-slate-300">{m.content}</p>
-                </motion.div>
-              ))
+                );
+              })
             )}
           </div>
         </div>
@@ -990,105 +1232,150 @@ export default function App() {
       </aside>
 
       {/* Main Content - Chat & Face Detection */}
-      <main className="flex-1 flex flex-col h-screen max-h-screen overflow-hidden">
-        {/* Robot's Eye - Face Detection View */}
-        <div className="p-6 bg-slate-900/20 border-b border-slate-800">
-          <div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-2 gap-6 items-center">
-            {/* 3D Robot Character */}
-            <div className="w-full aspect-video lg:aspect-square max-h-[400px]">
-              <RobotCharacter 
-                expression={currentExpression || 'neutral'} 
-                isListening={isListening} 
-                isSpeaking={isLoading || (messages.length > 0 && messages[messages.length-1].role === 'model' && !isLoading)} 
-                lookAt={lookAt}
-              />
-            </div>
+      <main className="flex-1 flex flex-col h-screen max-h-screen overflow-hidden relative">
+        
+        {/* Floating Draggable Robot's Eye - Face Detection View */}
+        <motion.div 
+          drag
+          dragMomentum={false}
+          dragConstraints={{ left: 0, top: 0, right: 1000, bottom: 800 }}
+          className="absolute z-50 p-2 bg-slate-900/80 backdrop-blur-xl border border-slate-700/50 rounded-3xl shadow-2xl flex flex-col"
+          style={{ 
+            width: '800px', 
+            height: '400px', 
+            top: '20px', 
+            left: '20px',
+            resize: 'both',
+            overflow: 'hidden',
+            minWidth: '300px',
+            minHeight: '200px'
+          }}
+        >
+          {/* Drag Handle Area */}
+          <div className="w-full h-6 flex items-center justify-center cursor-move mb-2 opacity-50 hover:opacity-100 transition-opacity">
+            <div className="w-12 h-1.5 bg-slate-500 rounded-full pointer-events-none" />
+          </div>
+          <div 
+            className="w-full flex-1 cursor-auto min-h-0"
+            onPointerDownCapture={(e) => e.stopPropagation()}
+          >
+            <PanelGroup direction={panelDirection} className="w-full h-full rounded-2xl overflow-hidden border-2 border-slate-800 shadow-inner">
+              <Panel defaultSize={50} minSize={30}>
+                {/* Camera View */}
+                <div className="relative w-full h-full bg-slate-950 group">
+                  <video 
+                    ref={videoRef} 
+                    autoPlay 
+                    muted 
+                    className={cn(
+                      "w-full h-full object-cover transition-opacity duration-500",
+                      isDetecting ? "opacity-100" : "opacity-0"
+                    )}
+                  />
+                  {!isDetecting && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-600 gap-2">
+                      <Camera className="w-12 h-12" />
+                      <p className="text-sm font-bold">摄像头未开启</p>
+                    </div>
+                  )}
+                  {isDetecting && (
+                    <div className="absolute top-4 left-4 flex flex-col gap-2">
+                      <div className="flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10">
+                        <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
+                        <span className="text-[10px] font-bold text-white uppercase tracking-wider">Live Feed</span>
+                      </div>
+                      {currentExpression && (
+                        <div className="bg-indigo-600/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-indigo-400/30 flex items-center gap-2">
+                          <Smile className="w-3 h-3 text-white" />
+                          <span className="text-[10px] font-bold text-white uppercase tracking-wider">{currentExpression}</span>
+                        </div>
+                      )}
+                      {lastGesture && (
+                        <div className="bg-amber-600/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-amber-400/30 flex items-center gap-2">
+                          <Activity className="w-3 h-3 text-white" />
+                          <span className="text-[10px] font-bold text-white uppercase tracking-wider">Gesture: {lastGesture}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  
+                  {/* Loudness Meter */}
+                  {isDetecting && (
+                    <div className="absolute bottom-4 left-4 right-4 h-1 bg-white/10 rounded-full overflow-hidden">
+                      <motion.div 
+                        className="h-full bg-indigo-500"
+                        animate={{ width: `${Math.min(loudness * 2, 100)}%` }}
+                        transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+                      />
+                    </div>
+                  )}
 
-            {/* Camera View */}
-            <div className="relative w-full aspect-video bg-slate-950 rounded-3xl overflow-hidden border-4 border-slate-800 shadow-2xl group ring-1 ring-indigo-500/20">
-              <video 
-                ref={videoRef} 
-                autoPlay 
-                muted 
-                className={cn(
-                  "w-full h-full object-cover transition-opacity duration-500",
-                  isDetecting ? "opacity-100" : "opacity-0"
-                )}
-              />
-              {!isDetecting && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-600 gap-2">
-                  <Camera className="w-12 h-12" />
-                  <p className="text-sm font-bold">摄像头未开启</p>
-                </div>
-              )}
-              {isDetecting && (
-                <div className="absolute top-4 left-4 flex flex-col gap-2">
-                  <div className="flex items-center gap-2 bg-black/60 backdrop-blur-md px-3 py-1.5 rounded-full border border-white/10">
-                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse" />
-                    <span className="text-[10px] font-bold text-white uppercase tracking-wider">Live Feed</span>
+                  <div className="absolute inset-0 border-[10px] border-transparent group-hover:border-indigo-500/5 transition-all pointer-events-none" />
+                  <div className="absolute top-4 right-4 flex gap-2">
+                    <button 
+                      onClick={isDetecting ? stopCamera : startCamera}
+                      className={cn(
+                        "p-2 rounded-xl transition-all shadow-lg backdrop-blur-md border",
+                        isDetecting 
+                          ? "bg-red-500/20 border-red-500/50 text-red-500 hover:bg-red-500 hover:text-white" 
+                          : "bg-indigo-600 border-indigo-400 text-white hover:bg-indigo-500"
+                      )}
+                    >
+                      <Camera className="w-4 h-4" />
+                    </button>
                   </div>
-                  {currentExpression && (
-                    <div className="bg-indigo-600/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-indigo-400/30 flex items-center gap-2">
-                      <Smile className="w-3 h-3 text-white" />
-                      <span className="text-[10px] font-bold text-white uppercase tracking-wider">{currentExpression}</span>
-                    </div>
-                  )}
-                  {lastGesture && (
-                    <div className="bg-amber-600/80 backdrop-blur-md px-3 py-1.5 rounded-full border border-amber-400/30 flex items-center gap-2">
-                      <Activity className="w-3 h-3 text-white" />
-                      <span className="text-[10px] font-bold text-white uppercase tracking-wider">Gesture: {lastGesture}</span>
-                    </div>
-                  )}
                 </div>
-              )}
+              </Panel>
               
-              {/* Loudness Meter */}
-              {isDetecting && (
-                <div className="absolute bottom-4 left-4 right-4 h-1 bg-white/10 rounded-full overflow-hidden">
-                  <motion.div 
-                    className="h-full bg-indigo-500"
-                    animate={{ width: `${Math.min(loudness * 2, 100)}%` }}
-                    transition={{ type: 'spring', stiffness: 300, damping: 30 }}
+              <PanelResizeHandle className={cn(
+                "bg-slate-800 hover:bg-indigo-500 transition-colors flex items-center justify-center",
+                panelDirection === 'horizontal' ? "w-2 cursor-col-resize" : "h-2 cursor-row-resize"
+              )}>
+                <GripVertical className={cn("text-slate-500", panelDirection === 'horizontal' ? "w-4 h-4" : "w-4 h-4 rotate-90")} />
+              </PanelResizeHandle>
+              
+              <Panel defaultSize={50} minSize={30}>
+                {/* 3D Robot Character */}
+                <div className="w-full h-full bg-slate-950/50">
+                  <RobotCharacter 
+                    expression={robotExpression || currentExpression || 'neutral'} 
+                    isListening={isListening} 
+                    isSpeaking={isLoading || (messages.length > 0 && messages[messages.length-1].role === 'model' && !isLoading)} 
+                    lookAt={lookAt}
+                    isAwake={isAwake}
                   />
                 </div>
-              )}
-
-              <div className="absolute inset-0 border-[20px] border-transparent group-hover:border-indigo-500/5 transition-all pointer-events-none" />
-              <div className="absolute top-4 right-4 flex gap-2">
-                <button 
-                  onClick={isDetecting ? stopCamera : startCamera}
-                  className={cn(
-                    "p-3 rounded-2xl transition-all shadow-lg backdrop-blur-md border",
-                    isDetecting 
-                      ? "bg-red-500/20 border-red-500/50 text-red-500 hover:bg-red-500 hover:text-white" 
-                      : "bg-indigo-600 border-indigo-400 text-white hover:bg-indigo-500"
-                  )}
-                >
-                  <Camera className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
+              </Panel>
+            </PanelGroup>
           </div>
-          
-          <div className="max-w-6xl mx-auto mt-6 flex flex-wrap gap-3 justify-center">
-            <button 
-              onClick={simulateNextDay}
-              className="bg-slate-800/50 hover:bg-slate-800 text-slate-300 px-6 py-3 rounded-2xl text-sm font-bold transition-all border border-slate-700 flex items-center gap-2 active:scale-95"
-            >
-              <RefreshCw className="w-4 h-4" />
-              模拟第二天
-            </button>
-            <button 
-              onClick={() => setIsVoiceEnabled(!isVoiceEnabled)}
-              className={cn(
-                "px-6 py-3 rounded-2xl transition-all border flex items-center gap-2 text-sm font-bold active:scale-95",
-                isVoiceEnabled ? "bg-green-500/10 border-green-500/50 text-green-400 shadow-lg shadow-green-500/10" : "bg-slate-800/50 border-slate-700 text-slate-500"
-              )}
-            >
-              <Volume2 className="w-4 h-4" />
-              {isVoiceEnabled ? '语音播报: 开启' : '语音播报: 关闭'}
-            </button>
-          </div>
+        </motion.div>
+        
+        {/* Top Controls */}
+        <div className="p-4 border-b border-slate-800 bg-slate-900/50 flex justify-end gap-3 z-10 relative">
+          <button 
+            onClick={() => setPanelDirection(prev => prev === 'horizontal' ? 'vertical' : 'horizontal')}
+            className="bg-slate-800/50 hover:bg-slate-800 text-slate-300 px-4 py-2 rounded-xl text-xs font-bold transition-all border border-slate-700 flex items-center gap-2 active:scale-95"
+          >
+            <GripVertical className={cn("w-3 h-3", panelDirection === 'vertical' ? "rotate-90" : "")} />
+            {panelDirection === 'horizontal' ? '上下分栏' : '左右分栏'}
+          </button>
+          <button 
+            onClick={simulateNextDay}
+            className="bg-slate-800/50 hover:bg-slate-800 text-slate-300 px-4 py-2 rounded-xl text-xs font-bold transition-all border border-slate-700 flex items-center gap-2 active:scale-95"
+          >
+            <RefreshCw className="w-3 h-3" />
+            模拟第二天
+          </button>
+          <button 
+            onClick={() => toggleLiveAPI(audioContextRef.current || undefined, audioStreamRef.current || undefined)}
+            className={cn(
+              "px-4 py-2 rounded-xl transition-all border flex items-center gap-2 text-xs font-bold active:scale-95",
+              isVoiceEnabled ? "bg-green-500/10 border-green-500/50 text-green-400 shadow-lg shadow-green-500/10" : "bg-slate-800/50 border-slate-700 text-slate-500"
+            )}
+          >
+            <Volume2 className="w-3 h-3" />
+            {isVoiceEnabled ? '实时语音: 开启' : '实时语音: 关闭'}
+          </button>
         </div>
 
         {/* Chat Messages */}
@@ -1146,7 +1433,7 @@ export default function App() {
         <div className="p-6 bg-slate-900/50 border-t border-slate-800">
           <div className="max-w-4xl mx-auto flex gap-3">
             <button 
-              onClick={startListening}
+              onClick={() => toggleLiveAPI(audioContextRef.current || undefined, audioStreamRef.current || undefined)}
               className={cn(
                 "p-4 rounded-2xl transition-all flex items-center justify-center",
                 isListening ? "bg-red-500 animate-pulse" : "bg-slate-800 hover:bg-slate-700"
@@ -1241,14 +1528,53 @@ export default function App() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-sm font-medium text-slate-400 mb-2">交互风格</label>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="block text-sm font-medium text-slate-400">交互风格</label>
+                    <button 
+                      onClick={async () => {
+                        setIsLoading(true);
+                        try {
+                          const { generatePersonaStyle } = await import('./lib/gemini');
+                          const newStyle = await generatePersonaStyle(persona.mbti);
+                          if (newStyle) {
+                            setPersona({ ...persona, style: newStyle });
+                          }
+                        } finally {
+                          setIsLoading(false);
+                        }
+                      }}
+                      disabled={isLoading}
+                      className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1 disabled:opacity-50"
+                    >
+                      {isLoading ? <RefreshCw className="w-3 h-3 animate-spin" /> : <Sparkles className="w-3 h-3" />}
+                      AI 续写
+                    </button>
+                  </div>
                   <textarea 
                     value={persona.style}
                     onChange={(e) => setPersona({ ...persona, style: e.target.value })}
-                    rows={3}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-600/50 outline-none resize-none"
+                    rows={4}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-white focus:ring-2 focus:ring-indigo-600/50 outline-none resize-none text-sm"
                     placeholder="例如：幽默风趣、严谨专业、温暖治愈..."
                   />
+                </div>
+                <div className="flex items-center justify-between bg-slate-950 p-4 rounded-xl border border-slate-800">
+                  <div>
+                    <div className="text-sm font-medium text-white">开启摄像头时自动激活实时语音</div>
+                    <div className="text-xs text-slate-500 mt-1">后续所有交互将默认走 Gemini 实时对话模型</div>
+                  </div>
+                  <button
+                    onClick={() => setAutoStartLive(!autoStartLive)}
+                    className={cn(
+                      "w-12 h-6 rounded-full transition-colors relative",
+                      autoStartLive ? "bg-indigo-600" : "bg-slate-700"
+                    )}
+                  >
+                    <div className={cn(
+                      "w-4 h-4 bg-white rounded-full absolute top-1 transition-transform",
+                      autoStartLive ? "translate-x-7" : "translate-x-1"
+                    )} />
+                  </button>
                 </div>
                 <div className="flex gap-3 pt-4">
                   <button 
