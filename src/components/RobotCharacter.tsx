@@ -70,13 +70,17 @@ const HumanoidRobot = ({ expression, isListening, isSpeaking, lookAt, isAwake }:
       const s = 1 + Math.sin(t * 8) * 0.15;
       leftEyeRef.current.scale.set(s, s, s);
       rightEyeRef.current.scale.set(s, s, s);
-      leftEyeRef.current.material.color.setHex(0x4ade80); // Green when awake
-      rightEyeRef.current.material.color.setHex(0x4ade80);
+      const leftMat = Array.isArray(leftEyeRef.current.material) ? leftEyeRef.current.material[0] : leftEyeRef.current.material;
+      const rightMat = Array.isArray(rightEyeRef.current.material) ? rightEyeRef.current.material[0] : rightEyeRef.current.material;
+      (leftMat as THREE.MeshBasicMaterial).color.setHex(0x4ade80); // Green when awake
+      (rightMat as THREE.MeshBasicMaterial).color.setHex(0x4ade80);
     } else if (leftEyeRef.current && rightEyeRef.current) {
       leftEyeRef.current.scale.set(1, 1, 1);
       rightEyeRef.current.scale.set(1, 1, 1);
-      leftEyeRef.current.material.color.setHex(0x60a5fa); // Blue when asleep/idle
-      rightEyeRef.current.material.color.setHex(0x60a5fa);
+      const leftMat = Array.isArray(leftEyeRef.current.material) ? leftEyeRef.current.material[0] : leftEyeRef.current.material;
+      const rightMat = Array.isArray(rightEyeRef.current.material) ? rightEyeRef.current.material[0] : rightEyeRef.current.material;
+      (leftMat as THREE.MeshBasicMaterial).color.setHex(0x60a5fa); // Blue when asleep/idle
+      (rightMat as THREE.MeshBasicMaterial).color.setHex(0x60a5fa);
     }
   });
 

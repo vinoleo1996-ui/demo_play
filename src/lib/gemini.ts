@@ -26,12 +26,16 @@ export async function generateTTS(text: string): Promise<string | null> {
 
 export interface Memory {
   id?: string;
-  content: string;
   timestamp: string;
-  isResolved: boolean;
+  userAnalysis: string; // Level 1
+  situationTracking: string; // Level 2
+  robotActionHistory: string; // Level 3
+  category?: 'mood' | 'topic' | 'event' | 'general';
+  // Compatibility fields
+  content?: string;
   personName?: string | null;
   location?: string | null;
-  category?: 'mood' | 'topic' | 'event' | 'general';
+  isResolved?: boolean;
 }
 
 export interface Persona {
@@ -40,41 +44,55 @@ export interface Persona {
   style: string;
 }
 
-export async function extractMemory(conversation: string, personName: string | null, location: string | null): Promise<{content: string, category: 'mood' | 'topic' | 'event' | 'general'} | null> {
+export const PersonaPresets: Record<string, Persona> = {
+  'warm': { name: '小博', mbti: 'ENFJ', style: '温暖且支持，总是鼓励用户' },
+  'humorous': { name: '博博', mbti: 'ENTP', style: '幽默风趣，喜欢开玩笑，用轻松的方式解决问题' },
+  'rigorous': { name: '博博士', mbti: 'INTJ', style: '严谨认真，逻辑清晰，提供高效的建议' },
+  'cute': { name: '小萌', mbti: 'ISFP', style: '呆萌可爱，喜欢用叠词，充满童心' }
+};
+
+export async function extractMemory(conversation: string, personName: string | null, location: string | null): Promise<Memory | null> {
   const response = await ai.models.generateContent({
     model: "gemini-3-flash-preview",
-    contents: `从这段对话中提取一个简短、具体的记忆点，以便机器人记住。
-    对话涉及的人物是: ${personName || '用户'}。
+    contents: `分析对话，更新用户的三层记忆库。
+    对话涉及人物: ${personName || '用户'}。
     当前位置: ${location || '未知'}。
-    如果没有重要内容，返回 "none"。
+    
+    【任务】：
+    1. 更新用户分析（Level 1）：外貌、心情、意图。
+    2. 更新场景追踪（Level 2）：当前环境、事件进展。
+    3. 更新机器人行动历史（Level 3）：机器人已执行的动作。
+    
     对话内容: ${conversation}`,
     config: {
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
         properties: {
-          hasMemory: { type: Type.BOOLEAN, description: "是否有值得记忆的内容" },
-          content: { type: Type.STRING, description: "提取的记忆内容，尽量包含主语" },
-          category: { 
-            type: Type.STRING, 
-            description: "记忆分类：mood(心情状态), topic(喜爱话题), event(任务事件), general(其他)" 
-          }
+          hasMemory: { type: Type.BOOLEAN },
+          userAnalysis: { type: Type.STRING },
+          situationTracking: { type: Type.STRING },
+          robotActionHistory: { type: Type.STRING },
+          category: { type: Type.STRING, enum: ['mood', 'topic', 'event', 'general'] }
         },
-        required: ["hasMemory"]
+        required: ["hasMemory", "userAnalysis", "situationTracking", "robotActionHistory"]
       },
-      systemInstruction: "你是一个记忆提取引擎，负责将用户的对话转化为结构化的家庭成员笔记本。只提取核心事件、心情状态或喜爱的话题，并尽量包含主语（例如：'张三明天去看周杰伦演唱会'、'用户今天心情很低落'、'李四非常喜欢打篮球'）。",
+      systemInstruction: "你是一个智能记忆核心。请将对话转化为结构化的三层记忆。每一层必须严格限制为单句描述，确保推理高效。",
     }
   });
 
   try {
     const jsonStr = response.text?.trim() || "{}";
     const data = JSON.parse(jsonStr);
-    if (!data.hasMemory || !data.content) return null;
+    if (!data.hasMemory) return null;
     
-    const validCategories = ['mood', 'topic', 'event', 'general'];
-    const category = validCategories.includes(data.category) ? data.category : 'general';
-    
-    return { content: data.content, category };
+    return {
+      timestamp: new Date().toISOString(),
+      userAnalysis: data.userAnalysis,
+      situationTracking: data.situationTracking,
+      robotActionHistory: data.robotActionHistory,
+      category: data.category || 'general'
+    };
   } catch (e) {
     return null;
   }
