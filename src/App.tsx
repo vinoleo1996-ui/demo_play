@@ -383,7 +383,8 @@ export default function App() {
           // 4090 终局架构：发送帧到服务端进行 GPU 推理
           // ------------------------------------------------------------------
           if (inferenceWsRef.current?.readyState === WebSocket.OPEN) {
-            const base64Image = canvas.toDataURL('image/jpeg', 0.6);
+            // 使用更高分辨率以保证检测准确性，4090 后端完全可以处理
+            const base64Image = canvas.toDataURL('image/jpeg', 0.8);
             inferenceWsRef.current.send(JSON.stringify({
               type: "frame",
               image: base64Image
@@ -560,11 +561,13 @@ export default function App() {
       const base64Audio = await generateTTS(text);
       if (base64Audio) {
         const audioData = atob(base64Audio);
+        console.log("Audio data length:", audioData.length);
         const arrayBuffer = new ArrayBuffer(audioData.length);
         const view = new Uint8Array(arrayBuffer);
         for (let i = 0; i < audioData.length; i++) {
           view[i] = audioData.charCodeAt(i);
         }
+        console.log("First 10 bytes:", view.slice(0, 10));
 
         if (!audioContextRef.current) {
           audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
@@ -580,12 +583,29 @@ export default function App() {
           }
         }
         
-        const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
-        const source = audioContextRef.current.createBufferSource();
-        source.buffer = audioBuffer;
-        source.connect(audioContextRef.current.destination);
-        source.onended = () => setIsSpeaking(false);
-        source.start(0);
+        try {
+          const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+          const source = audioContextRef.current.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioContextRef.current.destination);
+          source.onended = () => setIsSpeaking(false);
+          source.start(0);
+        } catch (e) {
+          console.error("decodeAudioData failed, trying raw PCM:", e);
+          // Assuming raw PCM 16kHz 16-bit mono
+          const float32 = new Float32Array(arrayBuffer.byteLength / 2);
+          const int16 = new Int16Array(arrayBuffer);
+          for (let i = 0; i < int16.length; i++) {
+            float32[i] = int16[i] / 32768;
+          }
+          const audioBuffer = audioContextRef.current.createBuffer(1, float32.length, 16000);
+          audioBuffer.getChannelData(0).set(float32);
+          const source = audioContextRef.current.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(audioContextRef.current.destination);
+          source.onended = () => setIsSpeaking(false);
+          source.start(0);
+        }
       } else {
         setIsSpeaking(false);
       }
@@ -1108,7 +1128,22 @@ export default function App() {
                       <div className="w-2 h-2 bg-green-500 rounded-full shrink-0" />
                       <span className="text-xs text-slate-300 font-bold truncate">{p.name}</span>
                     </div>
-                    <span className="text-[10px] text-slate-500">点击展开</span>
+                    <div className="flex items-center gap-2">
+                      <div 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (confirm(`确定要删除 ${p.name} 的人脸数据吗？`)) {
+                            deleteDoc(doc(db, 'users', user!.uid, 'people', p.id));
+                          }
+                        }}
+                        className="p-1 hover:bg-red-500/20 rounded text-red-400 cursor-pointer"
+                        role="button"
+                        tabIndex={0}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </div>
+                      <span className="text-[10px] text-slate-500">点击展开</span>
+                    </div>
                   </button>
                   <div className="px-3 pb-3 text-[10px] text-slate-400 border-t border-slate-700/50 pt-2">
                     {p.backgroundInfo || '暂无背景信息'}
